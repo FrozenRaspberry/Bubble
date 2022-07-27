@@ -41,6 +41,11 @@ contract ERC721A is
     uint128 numberMinted;
   }
 
+  struct LastSize {
+    uint256 size;
+    uint256 blockNumber;
+  }
+
   uint256 private currentIndex = 0;
 
   uint256 internal immutable collectionSize;
@@ -65,8 +70,8 @@ contract ERC721A is
   // Mapping from owner to operator approvals
   mapping(address => mapping(address => bool)) private _operatorApprovals;
 
-  // Owner names
-  mapping(uint256 => string) public _ownerNames;
+  /* Custom Trait */
+  mapping(uint256 => LastSize) public lastSizeOf;
 
   /**
    * @dev
@@ -226,27 +231,11 @@ contract ERC721A is
       "ERC721Metadata: URI query for nonexistent token"
     );
 
-    string[11] memory parts;
-    parts[0] = '<svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMinYMin meet" viewBox="0 0 350 350"><style>.head { fill: #63de00; font-family: Courier; font-size: 16px; }.base { fill: #63de00; font-family: Courier; font-size: 12px; }</style><rect width="100%" height="100%" fill="black" />';
-    parts[1] = '<text x="10" y="30" class="head">Liar Game #1: Minority Rule</text>';
-    parts[2] = '<text x="10" y="70" class="base">To,</text>';
-    parts[3] = '<text x="10" y="90" class="base">';
-    parts[4] = _ownerNames[tokenId];
-    parts[5] = '</text>';
-    parts[6] = '<text x="10" y="140" class="base">Thank you for participating in the game! </text>';
-    parts[7] = '<text x="10" y="160" class="base">By minting this pass, you have formally</text>';
-    parts[8] = '<text x="10" y="180" class="base">acknowledged your desire to play the Liar Game.</text>';
-    parts[9] = '<text x="10" y="220" class="base">Plase take good care of it.</text>';
-    parts[10] = '</svg>';
-
-    string memory output = string(abi.encodePacked(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7], parts[8]));
-    output = string(abi.encodePacked(output, parts[9], parts[10]));
-
-    string memory json = Base64.encode(bytes(string(abi.encodePacked('{"name": "Liar Game Pass #', toString(tokenId), '", "description": "This pass grants your permission to the game.","image":"data:image/svg+xml;base64,', Base64.encode(bytes(output)), '"}'))));
-    
-    output = string(abi.encodePacked('data:application/json;base64,', json));
-
-    return output;
+    string memory baseURI = _baseURI();
+    return
+      bytes(baseURI).length > 0
+        ? string(abi.encodePacked(baseURI, tokenId.toString()))
+        : "";
   }
 
   /**
@@ -355,11 +344,7 @@ contract ERC721A is
   }
 
   function _safeMint(address to, uint256 quantity) internal {
-    _safeMint(to, quantity, "", "");
-  }
-
-  function _safeMint(address to, uint256 quantity, string memory ownerName) internal {
-    _safeMint(to, quantity, "", ownerName);
+    _safeMint(to, quantity, "");
   }
 
   /**
@@ -373,23 +358,16 @@ contract ERC721A is
    *
    * Emits a {Transfer} event.
    */
-
   function _safeMint(
     address to,
     uint256 quantity,
-    bytes memory _data,
-    string memory ownerName
+    bytes memory _data
   ) internal {
     uint256 startTokenId = currentIndex;
     require(to != address(0), "ERC721A: mint to the zero address");
     // We know if the first token in the batch doesn't exist, the other ones don't as well, because of serial ordering.
     require(!_exists(startTokenId), "ERC721A: token already minted");
     require(quantity <= maxBatchSize, "ERC721A: quantity to mint too high");
-    require(bytes(ownerName).length <= 30, "ERC721A: the name is too long");
-
-    if (bytes(ownerName).length == 0) {
-      ownerName = "Anonymous";
-    }
 
     _beforeTokenTransfers(address(0), to, startTokenId, quantity);
 
@@ -403,12 +381,15 @@ contract ERC721A is
     uint256 updatedIndex = startTokenId;
 
     for (uint256 i = 0; i < quantity; i++) {
-      _ownerNames[startTokenId + i] = ownerName;
       emit Transfer(address(0), to, updatedIndex);
       require(
         _checkOnERC721Received(address(0), to, updatedIndex, _data),
         "ERC721A: transfer to non ERC721Receiver implementer"
       );
+      // update size during mint
+      lastSizeOf[updatedIndex].blockNumber = block.number;
+      lastSizeOf[updatedIndex].size = 5 + gasleft() % 4;
+
       updatedIndex++;
     }
 
@@ -448,6 +429,16 @@ contract ERC721A is
     );
     require(to != address(0), "ERC721A: transfer to the zero address");
 
+
+    uint256 size = sizeOf(tokenId);
+    require(size <= 14 && size >= 0, "Bubble Burst");
+    size += 3;
+    if (size > 14) {
+      size = 14;
+    }
+    lastSizeOf[tokenId].size = size;
+    lastSizeOf[tokenId].blockNumber = block.number;
+
     _beforeTokenTransfers(from, to, tokenId, 1);
 
     // Clear approvals from the previous owner
@@ -468,6 +459,8 @@ contract ERC721A is
         );
       }
     }
+
+    
 
     emit Transfer(from, to, tokenId);
     _afterTokenTransfers(from, to, tokenId, 1);
@@ -586,121 +579,42 @@ contract ERC721A is
     uint256 quantity
   ) internal virtual {}
 
-  function _burn(
-    uint256 tokenId
-  ) internal {
-    address from = ownerOf(tokenId);
-    address to = address(0xdead);
-
-    TokenOwnership memory prevOwnership = ownershipOf(tokenId);
-
-    _beforeTokenTransfers(from, to, tokenId, 1);
-
-    // Clear approvals from the previous owner
-    _approve(address(0), tokenId, prevOwnership.addr);
-
-    _addressData[from].balance -= 1;
-    _addressData[to].balance += 1;
-    _ownerships[tokenId] = TokenOwnership(to, uint64(block.timestamp));
-
-    // If the ownership slot of tokenId+1 is not explicitly set, that means the transfer initiator owns it.
-    // Set the slot of tokenId+1 explicitly in storage to maintain correctness for ownerOf(tokenId+1) calls.
-    uint256 nextTokenId = tokenId + 1;
-    if (_ownerships[nextTokenId].addr == address(0)) {
-      if (_exists(nextTokenId)) {
-        _ownerships[nextTokenId] = TokenOwnership(
-          prevOwnership.addr,
-          prevOwnership.startTimestamp
-        );
-      }
+  function sizeOf(uint256 tokenId) public view returns (uint) {
+    require(
+      _exists(tokenId),
+      "ERC721Metadata: size query for nonexistent token"
+    );
+    //PROD 3000
+    uint deltaSize = (block.number - lastSizeOf[tokenId].blockNumber) / 3000;
+    if (deltaSize > lastSizeOf[tokenId].size) {
+      return 15;
+    } else {
+      return lastSizeOf[tokenId].size - deltaSize;
     }
-
-    emit Transfer(from, to, tokenId);
-    _afterTokenTransfers(from, to, tokenId, 1);
   }
 
-  function toString(uint256 value) internal pure returns (string memory) {
-  // Inspired by OraclizeAPI's implementation - MIT license
-  // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol
-
-      if (value == 0) {
-          return "0";
-      }
-      uint256 temp = value;
-      uint256 digits;
-      while (temp != 0) {
-          digits++;
-          temp /= 10;
-      }
-      bytes memory buffer = new bytes(digits);
-      while (value != 0) {
-          digits -= 1;
-          buffer[digits] = bytes1(uint8(48 + uint256(value % 10)));
-          value /= 10;
-      }
-      return string(buffer);
+  function colorOf(uint256 tokenId) public view returns (uint) {
+    require(
+      _exists(tokenId),
+      "ERC721Metadata: size query for nonexistent token"
+    );
+    uint colorId = tokenId % 55;
+    if (colorId >= 54){
+      return 7;
+    } else if (colorId >= 51) {
+      return 6;
+    } else if (colorId >= 46) {
+      return 5;
+    } else if (colorId >= 39) {
+      return 4;
+    } else if (colorId >= 31) {
+      return 3;
+    } else if (colorId >= 22) {
+      return 3;
+    } else if (colorId >= 12) {
+      return 1;
+    } else {
+      return 0;
+    } 
   }
-}
-
-
-
-/// [MIT License]
-/// @title Base64
-/// @notice Provides a function for encoding some bytes in base64
-/// @author Brecht Devos <brecht@loopring.org>
-library Base64 {
-    bytes internal constant TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    /// @notice Encodes some bytes to the base64 representation
-    function encode(bytes memory data) internal pure returns (string memory) {
-        uint256 len = data.length;
-        if (len == 0) return "";
-
-        // multiply by 4/3 rounded up
-        uint256 encodedLen = 4 * ((len + 2) / 3);
-
-        // Add some extra buffer at the end
-        bytes memory result = new bytes(encodedLen + 32);
-
-        bytes memory table = TABLE;
-
-        assembly {
-            let tablePtr := add(table, 1)
-            let resultPtr := add(result, 32)
-
-            for {
-                let i := 0
-            } lt(i, len) {
-
-            } {
-                i := add(i, 3)
-                let input := and(mload(add(data, i)), 0xffffff)
-
-                let out := mload(add(tablePtr, and(shr(18, input), 0x3F)))
-                out := shl(8, out)
-                out := add(out, and(mload(add(tablePtr, and(shr(12, input), 0x3F))), 0xFF))
-                out := shl(8, out)
-                out := add(out, and(mload(add(tablePtr, and(shr(6, input), 0x3F))), 0xFF))
-                out := shl(8, out)
-                out := add(out, and(mload(add(tablePtr, and(input, 0x3F))), 0xFF))
-                out := shl(224, out)
-
-                mstore(resultPtr, out)
-
-                resultPtr := add(resultPtr, 4)
-            }
-
-            switch mod(len, 3)
-            case 1 {
-                mstore(sub(resultPtr, 2), shl(240, 0x3d3d))
-            }
-            case 2 {
-                mstore(sub(resultPtr, 1), shl(248, 0x3d))
-            }
-
-            mstore(result, encodedLen)
-        }
-
-        return string(result);
-    }
 }
